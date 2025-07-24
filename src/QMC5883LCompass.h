@@ -27,13 +27,25 @@ private:
   static const uint8_t QMC5883L_REG_STATUS = 0x06;
   static const uint8_t QMC5883L_REG_CONFIG_1 = 0x09;
   static const uint8_t QMC5883L_REG_CONFIG_2 = 0x0A;
+  static const uint8_t QMC5883L_REG_SET_RESET = 0x0B;
 
 // Control Register 1 bits
+#define QMC5883L_MODE_STANDBY       (0b00 << 0)
+#define QMC5883L_MODE_CONTINUOUS    (0b01 << 0)
 
-  #define QMC5883L_MODE_CONTINUOUS 0x01 // Continuous mode
-  #define QMC5883L_ODR_200HZ 0x03 // 10 Hz output data rate
-  #define QMC5883L_RNG_8G 0x01 // 2 gauss full scale
-  #define QMC5883L_OSR_512 0x00 // 512 samples per measurement
+#define QMC5883L_ODR_10HZ           (0b00 << 2)
+#define QMC5883L_ODR_50HZ           (0b01 << 2)
+#define QMC5883L_ODR_100HZ          (0b10 << 2)
+#define QMC5883L_ODR_200HZ          (0b11 << 2)
+
+#define QMC5883L_RNG_2G             (0b00 << 4)
+#define QMC5883L_RNG_8G             (0b01 << 4)
+
+#define QMC5883L_OSR_64             (0b00 << 6)
+#define QMC5883L_OSR_128            (0b01 << 6)
+#define QMC5883L_OSR_256            (0b10 << 6)
+#define QMC5883L_OSR_512            (0b11 << 6)
+
 
   // Calibration variables
   int16_t magXmin = 0, magXmax = 0;
@@ -69,9 +81,6 @@ public:
   // Heading is measured clockwise from North (0° = North).
   bool readCompass(int16_t &x, int16_t &y, int16_t &z);
   float getHeading();
-  float getTiltAngle();
-  float getRollAngle();
-  float getPitchAngle();
 
   // Calibration
   void startCalibration();

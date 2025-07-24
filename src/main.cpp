@@ -94,17 +94,9 @@ void loop() {
       lastUpdate = currentTime;
       return;
     }
-    float tiltAngle = compass.getTiltAngle();
-    float rollAngle = compass.getRollAngle();
-    float pitchAngle = compass.getPitchAngle();
+
     Serial.print("Азимут: ");
     Serial.print(headingDegrees, 1);
-    Serial.print("° | Наклон: ");
-    Serial.print(tiltAngle, 1);
-    Serial.print("° | Крен: ");
-    Serial.print(rollAngle, 1);
-    Serial.print("° | Тангаж: ");
-    Serial.print(pitchAngle, 1);
     Serial.print("° | Raw: X=");
     Serial.print(x);
     Serial.print(" Y=");

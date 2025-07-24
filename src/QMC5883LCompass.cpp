@@ -67,57 +67,58 @@ bool QMC5883LCompass::begin(uint32_t clockSpeed) {
     return false;
   }
   
-  // Configure QMC5883L
-  // Control 1: Continuous mode, 200Hz ODR, 8G range, 512 oversampling
-  byte control1 = QMC5883L_MODE_CONTINUOUS | QMC5883L_ODR_200HZ | QMC5883L_RNG_8G | QMC5883L_OSR_512;
-  if (!writeRegister(QMC5883L_REG_CONFIG_1, control1)) {
+  // Perform a soft reset to ensure a clean state
+  if (!writeRegister(QMC5883L_REG_CONFIG_2, 0x80)) {
     return false;
   }
+  delay(100);
 
-  // Control 2: Enable interrupt pin
+  // --- STAGE 1: Configure sensor parameters in STANDBY mode ---
+
+  // Set SET/RESET period - crucial for some clones
+  if (!writeRegister(QMC5883L_REG_SET_RESET, 0x01)) {
+    return false;
+  }
+  
+  // Configure Control Register 2: Disable interrupt pin
   if (!writeRegister(QMC5883L_REG_CONFIG_2, 0x01)) {
     return false;
   }
+
+  // Configure Control Register 1: Set ODR, Range, OSR, but keep in STANDBY mode
+  byte control1_standby = QMC5883L_MODE_STANDBY | QMC5883L_ODR_50HZ | QMC5883L_RNG_8G | QMC5883L_OSR_512;
+  if (!writeRegister(QMC5883L_REG_CONFIG_1, control1_standby)) {
+    return false;
+  }
+
+  // --- STAGE 2: Wake up the sensor by switching to CONTINUOUS mode ---
+  
+  byte control1_continuous = QMC5883L_MODE_CONTINUOUS | QMC5883L_ODR_10HZ | QMC5883L_RNG_8G | QMC5883L_OSR_512;
+  if (!writeRegister(QMC5883L_REG_CONFIG_1, control1_continuous)) {
+    return false;
+  }
+
+  delay(10); // Give sensor time to start measuring
 
   return true;
 }
 
 // Function to read compass data
+// NOTE: Due to a bug in this specific sensor clone, the DRDY status flag
+// is unreliable. This function performs a direct read of the data registers.
+// It is the responsibility of the calling code to ensure this function is
+// not called faster than the Output Data Rate (e.g., 10Hz -> every 100ms).
 bool QMC5883LCompass::readCompass(int16_t &x, int16_t &y, int16_t &z) {
-  // Wait for data to be ready (DRDY bit in status register)
-  unsigned long timeout = millis() + 1000;
-  bool dataReady = false;
-Serial.println(0);
-  while (!dataReady && millis() <= timeout) {
-    uint8_t status = readRegister(QMC5883L_REG_STATUS);
-    Serial.println(1);
-    if (i2cError) {
-      return false; // Exit on I2C error
-    }
-    
-    Serial.println(2);
-    
-    if (status & 0x01) {
-      dataReady = true; // Data is ready, exit loop
-    } else {
-      delay(10); // Wait a bit before polling again
-    }
-  }
-  Serial.println(3);
-  if (!dataReady) {
-    i2cError = true; // Set error flag on timeout
-    return false;
-  }
-
-  Serial.println("Data ready");
-
-  // Read data registers
+  // Direct read of data registers, bypassing status check.
   x = readRegister16(QMC5883L_REG_OUT_X_L);
   y = readRegister16(QMC5883L_REG_OUT_Y_L);
   z = readRegister16(QMC5883L_REG_OUT_Z_L);
-  Serial.println("Data read");
 
-  // Check if reading was successful
+  if (i2cError) {
+    return false; // Check if the read operations failed
+  }
+
+  // A basic check to see if the sensor is stuck on zero
   if (x == 0 && y == 0 && z == 0) {
     return false;
   }
@@ -132,35 +133,31 @@ Serial.println(0);
 
 // Function to check calibration quality
 bool QMC5883LCompass::hasGoodCalibration() const {
-  if (!_isCalibrated) return false;
-
-  // Check if calibration range is reasonable
-  float xRange = magXmax - magXmin;
-  float yRange = magYmax - magYmin;
-  
-  // For QMC5883L with 8G range, typical values are:
-  // - Raw values: -32768 to +32767 (16-bit)
-  // - Typical magnetic field strength: ±2000-4000 LSB
-  // - A good calibration should have a range > 500 LSB
-  float minRange = 500;  // Minimum reasonable range
-  float maxRange = 10000; // Maximum reasonable range
-
-  if (xRange < minRange || yRange < minRange) {
-    return false; // Range too small - poor calibration
+  if (!_isCalibrated) {
+    return false;
   }
 
-  if (xRange > maxRange || yRange > maxRange) {
-    return false; // Range too large - possible sensor error
+  // 1. Check for sensor saturation
+  // If min/max values are at the 16-bit integer limits, it means the
+  // magnetic field was stronger than the sensor's range.
+  const int16_t limit = 32760; // Use a value slightly lower than 32767
+  if (abs(magXmin) >= limit || abs(magXmax) >= limit ||
+      abs(magYmin) >= limit || abs(magYmax) >= limit) {
+    return false; // Saturation detected
   }
 
-  // Check if scales are reasonable (should be > 250 for good calibration)
-  if (magXscale < 250 || magYscale < 250) {
-    return false; // Scale too small - poor calibration
+  // 2. Check for reasonable scale values
+  // Scales should be positive and not excessively small.
+  if (magXscale < 100.0f || magYscale < 100.0f) {
+    return false; // Scale is too small, likely a failed calibration
   }
 
-  // Check if scales are not too large (should be < 5000)
-  if (magXscale > 5000 || magYscale > 5000) {
-    return false; // Scale too large - possible error
+  // 3. Check for ellipticity
+  // For a good calibration, the scales of X and Y axes should be similar.
+  // If one is drastically larger than the other, the calibration is skewed.
+  float ratio = magXscale / magYscale;
+  if (ratio < 0.33f || ratio > 3.0f) {
+    return false; // Ellipticity is too high
   }
 
   return true;
@@ -186,8 +183,8 @@ float QMC5883LCompass::getHeading() {
     calibratedY = y;
   }
   // Calculate heading: angle clockwise from North.
-  // With X=North and Y=West, the formula is atan2(-y, x).
-  heading = atan2(-calibratedY, calibratedX);
+  // Swapped X and Y in the formula to match the actual sensor axis orientation.
+  heading = atan2(-calibratedX, calibratedY);
 
   // Add declination angle correction (convert declination from degrees to radians)
   heading += declinationAngle * PI / 180.0f;
@@ -204,65 +201,6 @@ float QMC5883LCompass::getHeading() {
   float headingDegrees = heading * 180.0f / PI;
   
   return headingDegrees;
-}
-
-// Function to get tilt angle (total tilt from horizontal)
-float QMC5883LCompass::getTiltAngle() {
-  int16_t x, y, z;
-  if (!readCompass(x, y, z)) {
-    return -1; // Error reading sensor
-  }
-
-  // Apply calibration if available
-  float calX = x, calY = y;
-  if (_isCalibrated) {
-    calX = (x - magXoffset) / magXscale;
-    calY = (y - magYoffset) / magYscale;
-  }
-
-  // Calculate tilt angle using DFRobot approach
-  // AngleXZ = angle between X-axis and Z-axis (tilt in X-Z plane)
-  float tiltAngle = atan2((double)z, sqrt((double)calX * calX + (double)calY * calY)) * 180.0f / PI;
-  
-  return tiltAngle;
-}
-
-// Function to get roll angle (rotation around X-axis)
-float QMC5883LCompass::getRollAngle() {
-  int16_t x, y, z;
-  if (!readCompass(x, y, z)) {
-    return -1; // Error reading sensor
-  }
-
-  // Apply calibration if available
-  float calY = y;
-  if (_isCalibrated) {
-    calY = (y - magYoffset) / magYscale;
-  }
-
-  // Roll is rotation around X-axis (Y-Z plane) - using DFRobot approach
-  float rollAngle = atan2((double)z, (double)calY) * 180.0f / PI;
-  
-  return rollAngle;
-}
-
-// Function to get pitch angle (rotation around Y-axis)
-float QMC5883LCompass::getPitchAngle() {
-  int16_t x, y, z;
-  if (!readCompass(x, y, z)) {
-    return -1; // Error reading sensor
-  }
-
-  // Apply calibration if available
-  float calX = x;
-  if (_isCalibrated) {
-    calX = (x - magXoffset) / magXscale;
-  }
-
-  // Pitch is rotation around Y-axis (X-Z plane) - using DFRobot approach
-  float pitchAngle = atan2((double)z, (double)calX) * 180.0f / PI;
-  
-  return pitchAngle;
 }
 
 // Function to start calibration
